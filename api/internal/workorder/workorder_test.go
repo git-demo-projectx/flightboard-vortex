@@ -3,6 +3,7 @@ package workorder
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +138,119 @@ func TestValidateNew(t *testing.T) {
 				t.Fatalf("ValidateNew() err = %v, wantErr %v", err, tt.wantErr)
 			}
 			if err != nil && !errors.Is(err, ErrInvalid) {
+				t.Fatalf("error %v does not wrap ErrInvalid", err)
+			}
+		})
+	}
+}
+
+func TestValidateNewTextLimits(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*WorkOrder)
+		want   string
+	}{
+		{"title of 120 characters", func(w *WorkOrder) { w.Title = strings.Repeat("a", 120) }, ""},
+		{"title of 121 characters", func(w *WorkOrder) { w.Title = strings.Repeat("a", 121) }, "title must not exceed 120 characters"},
+		{"title of 120 accented characters", func(w *WorkOrder) { w.Title = strings.Repeat("\u00e9", 120) }, ""},
+		{"title of 121 accented characters", func(w *WorkOrder) { w.Title = strings.Repeat("\u00e9", 121) }, "title must not exceed 120 characters"},
+		{"type of work of 60 characters", func(w *WorkOrder) { w.TypeOfWork = strings.Repeat("\u00e9", 60) }, ""},
+		{"type of work of 61 characters", func(w *WorkOrder) { w.TypeOfWork = strings.Repeat("a", 61) }, "type of work must not exceed 60 characters"},
+		{"buyer of 80 characters", func(w *WorkOrder) { w.Buyer = strings.Repeat("\u00e9", 80) }, ""},
+		{"buyer of 81 characters", func(w *WorkOrder) { w.Buyer = strings.Repeat("a", 81) }, "buyer must not exceed 80 characters"},
+		{"city of 60 characters", func(w *WorkOrder) { w.Location.City = strings.Repeat("\u00e9", 60) }, ""},
+		{"city of 61 characters", func(w *WorkOrder) { w.Location.City = strings.Repeat("a", 61) }, "city must not exceed 60 characters"},
+		{"full state name", func(w *WorkOrder) { w.Location.State = "Minnesota" }, "state must be a two-letter code"},
+		{"state with a digit", func(w *WorkOrder) { w.Location.State = "M1" }, "state must be a two-letter code"},
+		{"non-ASCII state", func(w *WorkOrder) { w.Location.State = "\u00e9" }, "state must be a two-letter code"},
+		{"state with whitespace", func(w *WorkOrder) { w.Location.State = "M " }, "state must be a two-letter code"},
+		{"lower-case state", func(w *WorkOrder) { w.Location.State = "mn" }, ""},
+		{"mixed-case state", func(w *WorkOrder) { w.Location.State = "Mn" }, ""},
+		{"Draft with a 121-character title", func(w *WorkOrder) {
+			*w = WorkOrder{Title: strings.Repeat("a", 121), Status: StatusDraft}
+		}, "title must not exceed 120 characters"},
+		{"Draft with no state", func(w *WorkOrder) { *w = WorkOrder{Title: "x", Status: StatusDraft} }, ""},
+		{"Draft with a one-letter state", func(w *WorkOrder) {
+			*w = WorkOrder{Title: "x", Status: StatusDraft, Location: Location{State: "M"}}
+		}, "state must be a two-letter code"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := validPublished()
+			tt.mutate(&w)
+			err := ValidateNew(w)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("ValidateNew() err = %v, want nil", err)
+				}
+				return
+			}
+			want := "invalid work order: " + tt.want
+			if err == nil || err.Error() != want {
+				t.Fatalf("ValidateNew() err = %v, want %q", err, want)
+			}
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("error %v does not wrap ErrInvalid", err)
+			}
+		})
+	}
+}
+
+func TestValidateNewTasks(t *testing.T) {
+	tasks := make([]Task, 31)
+	for i := range tasks {
+		tasks[i] = Task{ID: fmt.Sprintf("t%d", i+1), Group: TaskPrep, Title: "Step"}
+	}
+	duplicate := []Task{
+		{ID: "t1", Group: TaskPrep, Title: "Survey"},
+		{ID: "t1", Group: TaskPost, Title: "Photos"},
+	}
+	tests := []struct {
+		name  string
+		tasks []Task
+		draft bool
+		want  string
+	}{
+		{"no tasks", nil, false, ""},
+		{"empty tasks", []Task{}, false, ""},
+		{"default tasks", DefaultTasks(), false, ""},
+		{"30 tasks", tasks[:30], false, ""},
+		{"31 tasks", tasks, false, "a work order can have at most 30 tasks"},
+		{"blank id", []Task{tasks[0], {ID: " ", Group: TaskPrep, Title: "Step"}}, false, "task 2 needs an id"},
+		{"duplicate id", duplicate, false, `duplicate task id "t1"`},
+		{"unknown group", []Task{{ID: "t5", Group: "Later", Title: "Label ports"}}, false, `task "t5" has unknown group "Later"`},
+		{"blank title", []Task{{ID: "t5", Group: TaskOnSite, Title: "  "}}, false, `task "t5" needs a title`},
+		{"title of 120 characters", []Task{{ID: "t5", Group: TaskPost, Title: strings.Repeat("a", 120)}}, false, ""},
+		{"title of 120 accented characters", []Task{{ID: "t5", Group: TaskPost, Title: strings.Repeat("\u00e9", 120)}}, false, ""},
+		{"title of 121 characters", []Task{{ID: "t5", Group: TaskPost, Title: strings.Repeat("a", 121)}}, false, `task "t5" title must not exceed 120 characters`},
+		{"title of 121 accented characters", []Task{{ID: "t5", Group: TaskPost, Title: strings.Repeat("\u00e9", 121)}}, false, `task "t5" title must not exceed 120 characters`},
+		{"Draft with a duplicate id", duplicate, true, `duplicate task id "t1"`},
+		{"ids are not trimmed for uniqueness", []Task{tasks[0], {ID: " t1 ", Group: TaskPrep, Title: "Step"}}, false, ""},
+		{"blank id before other task errors", []Task{{ID: "\t", Group: "Later"}}, false, "task 1 needs an id"},
+		{"duplicate before group and title", []Task{tasks[0], {ID: "t1", Group: "Later"}}, false, `duplicate task id "t1"`},
+		{"group before title", []Task{{ID: "t5", Group: "Later"}}, false, `task "t5" has unknown group "Later"`},
+		{"blank title before length", []Task{{ID: "t5", Group: TaskPrep, Title: strings.Repeat(" ", 121)}}, false, `task "t5" needs a title`},
+		{"tasks checked in list order", []Task{{ID: "t5", Group: TaskPrep}, {ID: " "}}, false, `task "t5" needs a title`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := validPublished()
+			w.Tasks = tt.tasks
+			if tt.draft {
+				w.Status = StatusDraft
+			}
+			err := ValidateNew(w)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("ValidateNew() err = %v, want nil", err)
+				}
+				return
+			}
+			want := "invalid work order: " + tt.want
+			if err == nil || err.Error() != want {
+				t.Fatalf("ValidateNew() err = %v, want %q", err, want)
+			}
+			if !errors.Is(err, ErrInvalid) {
 				t.Fatalf("error %v does not wrap ErrInvalid", err)
 			}
 		})

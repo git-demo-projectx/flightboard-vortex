@@ -252,13 +252,20 @@ func ValidatePay(p Pay) error {
 }
 
 // ValidateNew checks a work order before it is created. Drafts need only
-// a title. Published work orders need schedule, location and pay.
+// a title, and all supplied text and tasks must be valid. Published work
+// orders also need schedule, location and pay.
 func ValidateNew(w WorkOrder) error {
 	if strings.TrimSpace(w.Title) == "" {
 		return invalid("title is required")
 	}
 	if w.Status != StatusDraft && w.Status != StatusPublished {
 		return invalid("new work orders must be Draft or Published")
+	}
+	if err := validateNewText(w); err != nil {
+		return err
+	}
+	if err := validateNewTasks(w.Tasks); err != nil {
+		return err
 	}
 	if w.Status == StatusDraft {
 		return nil
@@ -279,4 +286,57 @@ func ValidateNew(w WorkOrder) error {
 		return invalid("schedule must not span more than 14 days")
 	}
 	return ValidatePay(w.Pay)
+}
+
+func validateNewText(w WorkOrder) error {
+	if utf8.RuneCountInString(w.Title) > 120 {
+		return invalid("title must not exceed 120 characters")
+	}
+	if utf8.RuneCountInString(w.TypeOfWork) > 60 {
+		return invalid("type of work must not exceed 60 characters")
+	}
+	if utf8.RuneCountInString(w.Buyer) > 80 {
+		return invalid("buyer must not exceed 80 characters")
+	}
+	if utf8.RuneCountInString(w.Location.City) > 60 {
+		return invalid("city must not exceed 60 characters")
+	}
+	if state := w.Location.State; state != "" {
+		if len(state) != 2 || !isASCIILetter(state[0]) || !isASCIILetter(state[1]) {
+			return invalid("state must be a two-letter code")
+		}
+	}
+	return nil
+}
+
+func isASCIILetter(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
+}
+
+func validateNewTasks(tasks []Task) error {
+	if len(tasks) > 30 {
+		return invalid("a work order can have at most 30 tasks")
+	}
+	seen := make(map[string]bool, len(tasks))
+	for i, task := range tasks {
+		if strings.TrimSpace(task.ID) == "" {
+			return invalid(fmt.Sprintf("task %d needs an id", i+1))
+		}
+		if seen[task.ID] {
+			return invalid(fmt.Sprintf("duplicate task id %q", task.ID))
+		}
+		seen[task.ID] = true
+		switch task.Group {
+		case TaskPrep, TaskOnSite, TaskPost:
+		default:
+			return invalid(fmt.Sprintf("task %q has unknown group %q", task.ID, task.Group))
+		}
+		if strings.TrimSpace(task.Title) == "" {
+			return invalid(fmt.Sprintf("task %q needs a title", task.ID))
+		}
+		if utf8.RuneCountInString(task.Title) > 120 {
+			return invalid(fmt.Sprintf("task %q title must not exceed 120 characters", task.ID))
+		}
+	}
+	return nil
 }
