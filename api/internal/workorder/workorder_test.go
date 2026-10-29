@@ -8,6 +8,43 @@ import (
 	"time"
 )
 
+func TestScheduleOverlaps(t *testing.T) {
+	parse := func(value string) time.Time {
+		t.Helper()
+		got, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	base := Schedule{Start: parse("2026-10-22T10:00:00-05:00"), End: parse("2026-10-22T11:00:00-05:00")}
+	for _, tt := range []struct {
+		name, start, end string
+		want             bool
+	}{
+		{"same window", "10:00:00-05:00", "11:00:00-05:00", true},
+		{"overlaps the start", "09:30:00-05:00", "10:30:00-05:00", true},
+		{"overlaps the end", "10:30:00-05:00", "11:30:00-05:00", true},
+		{"inside the other", "09:30:00-05:00", "11:30:00-05:00", true},
+		{"contains the other", "10:15:00-05:00", "10:45:00-05:00", true},
+		{"ends when the other starts", "11:00:00-05:00", "12:00:00-05:00", false},
+		{"starts when the other ends", "09:00:00-05:00", "10:00:00-05:00", false},
+		{"before", "12:00:00-05:00", "13:00:00-05:00", false},
+		{"after", "08:00:00-05:00", "09:00:00-05:00", false},
+		{"different zones", "15:30:00Z", "16:30:00Z", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			other := Schedule{Start: parse("2026-10-22T" + tt.start), End: parse("2026-10-22T" + tt.end)}
+			if got := base.Overlaps(other); got != tt.want {
+				t.Errorf("Overlaps() = %v, want %v", got, tt.want)
+			}
+			if got := other.Overlaps(base); got != tt.want {
+				t.Errorf("reverse Overlaps() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAcceptsExpenses(t *testing.T) {
 	for _, status := range Statuses {
 		t.Run(string(status), func(t *testing.T) {

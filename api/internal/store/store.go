@@ -179,6 +179,46 @@ func (s *Store) SetStatus(id int, to workorder.Status) (workorder.WorkOrder, err
 	})
 }
 
+// AssignProvider assigns a provider if the lifecycle and service window allow it.
+func (s *Store) AssignProvider(id int, providerID string) (workorder.WorkOrder, error) {
+	return s.update(id, func(w *workorder.WorkOrder) error {
+		if strings.TrimSpace(providerID) == "" {
+			return fmt.Errorf("%w: providerId is required", workorder.ErrInvalid)
+		}
+		provider, ok := s.providers[providerID]
+		if !ok {
+			return fmt.Errorf("%w: unknown provider %q", workorder.ErrInvalid, providerID)
+		}
+		if !workorder.CanTransition(w.Status, workorder.StatusAssigned) {
+			return fmt.Errorf("%w: cannot move from %s to Assigned", ErrConflict, w.Status)
+		}
+		if w.Schedule == nil {
+			return fmt.Errorf("%w: work order %d has no schedule", ErrConflict, w.ID)
+		}
+		if conflictID, found := s.bookingConflict(*w, providerID); found {
+			return fmt.Errorf("%w: %s is booked on work order %d at that time", ErrConflict, provider.Name, conflictID)
+		}
+		w.ProviderID = providerID
+		w.Status = workorder.StatusAssigned
+		w.SubStatus = ""
+		return nil
+	})
+}
+
+// bookingConflict reads work orders while the caller holds the store lock.
+func (s *Store) bookingConflict(w workorder.WorkOrder, providerID string) (int, bool) {
+	conflictID, found := 0, false
+	for otherID, other := range s.workOrders {
+		if otherID == w.ID || other.ProviderID != providerID || other.Status != workorder.StatusAssigned || other.Schedule == nil {
+			continue
+		}
+		if w.Schedule.Overlaps(*other.Schedule) && (!found || otherID < conflictID) {
+			conflictID, found = otherID, true
+		}
+	}
+	return conflictID, found
+}
+
 // SetTaskDone marks one task done or not done.
 func (s *Store) SetTaskDone(id int, taskID string, done bool) (workorder.WorkOrder, error) {
 	return s.update(id, func(w *workorder.WorkOrder) error {

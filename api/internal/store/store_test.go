@@ -3,7 +3,10 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +20,211 @@ func seeded(t *testing.T) *Store {
 		t.Fatalf("NewSeeded: %v", err)
 	}
 	return s
+}
+
+func createPublished(t *testing.T, s *Store, start, end string) int {
+	t.Helper()
+	parse := func(value string) time.Time {
+		t.Helper()
+		got, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	w, err := s.CreateWorkOrder(workorder.WorkOrder{
+		Title: "Install access points", TypeOfWork: "Networking", Status: workorder.StatusPublished,
+		Location: workorder.Location{City: "Edina", State: "MN"},
+		Pay:      workorder.Pay{Type: workorder.PayFixed, Rate: 100},
+		Schedule: &workorder.Schedule{Start: parse(start), End: parse(end)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w.ID
+}
+
+func TestAssignProvider(t *testing.T) {
+	for _, tt := range []struct {
+		name, provider string
+		id             int
+		setup          func(*testing.T, *Store) int
+		wantErr        error
+		message        string
+	}{
+		{name: "Published", id: 9631805, provider: "p-104"},
+		{name: "Routed", id: 9631809, provider: "p-101"},
+		{name: "empty provider", id: 9631805, wantErr: workorder.ErrInvalid, message: "invalid work order: providerId is required"},
+		{name: "blank provider", id: 9631805, provider: "  ", wantErr: workorder.ErrInvalid, message: "invalid work order: providerId is required"},
+		{name: "unknown provider", id: 9631805, provider: "p-999", wantErr: workorder.ErrInvalid, message: `invalid work order: unknown provider "p-999"`},
+		{name: "unknown work order", id: 1, provider: "p-101", wantErr: ErrNotFound, message: "not found"},
+		{name: "Draft", id: 9631801, provider: "p-101", wantErr: ErrConflict, message: "conflict: cannot move from Draft to Assigned"},
+		{name: "Assigned", id: 9631810, provider: "p-104", wantErr: ErrConflict, message: "conflict: cannot move from Assigned to Assigned"},
+		{name: "Cancelled", id: 9631825, provider: "p-101", wantErr: ErrConflict, message: "conflict: cannot move from Cancelled to Assigned"},
+		{name: "provider validation before status", id: 9631801, provider: "p-999", wantErr: workorder.ErrInvalid, message: `invalid work order: unknown provider "p-999"`},
+		{name: "no schedule", provider: "p-101", wantErr: ErrConflict, setup: func(t *testing.T, s *Store) int {
+			w, err := s.CreateWorkOrder(workorder.WorkOrder{Title: "No schedule", Status: workorder.StatusDraft})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.SetStatus(w.ID, workorder.StatusRouted); err != nil {
+				t.Fatal(err)
+			}
+			return w.ID
+		}},
+		{name: "double booking", provider: "p-101", wantErr: ErrConflict,
+			message: "conflict: Dana Whitfield is booked on work order 9631817 at that time",
+			setup: func(t *testing.T, s *Store) int {
+				return createPublished(t, s, "2026-10-22T10:00:00-05:00", "2026-10-22T12:00:00-05:00")
+			}},
+		{name: "Work Done does not block", provider: "p-104", setup: func(t *testing.T, s *Store) int {
+			return createPublished(t, s, "2026-10-16T09:00:00-05:00", "2026-10-16T10:00:00-05:00")
+		}},
+		{name: "Paid does not block", provider: "p-101", setup: func(t *testing.T, s *Store) int {
+			return createPublished(t, s, "2026-10-08T07:30:00-05:00", "2026-10-08T08:30:00-05:00")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := seeded(t)
+			id := tt.id
+			if tt.setup != nil {
+				id = tt.setup(t, s)
+			}
+			before, beforeErr := s.GetWorkOrder(id)
+			got, err := s.AssignProvider(id, tt.provider)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("AssignProvider err = %v, want %v", err, tt.wantErr)
+			}
+			after, afterErr := s.GetWorkOrder(id)
+			if tt.wantErr != nil {
+				message := tt.message
+				if tt.name == "no schedule" {
+					message = fmt.Sprintf("conflict: work order %d has no schedule", id)
+				}
+				checkAssignmentFailure(t, err, message, before, after, beforeErr, afterErr)
+				return
+			}
+			checkAssignmentSuccess(t, got, after, tt.provider, afterErr)
+		})
+	}
+}
+
+func checkAssignmentFailure(t *testing.T, err error, message string, before, after workorder.WorkOrder, beforeErr, afterErr error) {
+	t.Helper()
+	if err.Error() != message {
+		t.Errorf("error = %q, want %q", err, message)
+	}
+	if !errors.Is(afterErr, beforeErr) || !reflect.DeepEqual(before, after) {
+		t.Fatalf("failed assignment changed work order: before %+v, after %+v, err %v", before, after, afterErr)
+	}
+}
+
+func checkAssignmentSuccess(t *testing.T, got, after workorder.WorkOrder, provider string, err error) {
+	t.Helper()
+	if got.Status != workorder.StatusAssigned || got.ProviderID != provider || got.SubStatus != "" {
+		t.Fatalf("assigned work order = %+v", got)
+	}
+	if err != nil || !reflect.DeepEqual(got, after) {
+		t.Fatalf("assignment not persisted: %+v, err %v", after, err)
+	}
+}
+
+func TestAssignProviderLowestConflict(t *testing.T) {
+	s := seeded(t)
+	first := createPublished(t, s, "2026-10-30T09:00:00-05:00", "2026-10-30T10:00:00-05:00")
+	second := createPublished(t, s, "2026-10-30T10:00:00-05:00", "2026-10-30T11:00:00-05:00")
+	for _, id := range []int{first, second} {
+		if _, err := s.AssignProvider(id, "p-104"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	third := createPublished(t, s, "2026-10-30T09:30:00-05:00", "2026-10-30T10:30:00-05:00")
+	before, err := s.GetWorkOrder(third)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		_, err := s.AssignProvider(third, "p-104")
+		want := fmt.Sprintf("conflict: Tomas Lindqvist is booked on work order %d at that time", first)
+		if !errors.Is(err, ErrConflict) || err.Error() != want {
+			t.Fatalf("error = %v, want %q", err, want)
+		}
+		after, err := s.GetWorkOrder(third)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("failed assignment changed work order: %+v, err %v", after, err)
+		}
+	}
+}
+
+func TestAssignProviderOtherStatuses(t *testing.T) {
+	for _, status := range []workorder.Status{workorder.StatusWorkDone, workorder.StatusApproved, workorder.StatusPaid, workorder.StatusCancelled} {
+		t.Run(string(status)+" does not block new booking", func(t *testing.T) {
+			s := seeded(t)
+			first := createPublished(t, s, "2026-10-30T09:00:00-05:00", "2026-10-30T10:00:00-05:00")
+			if _, err := s.AssignProvider(first, "p-104"); err != nil {
+				t.Fatal(err)
+			}
+			steps := []workorder.Status{workorder.StatusWorkDone, workorder.StatusApproved, workorder.StatusPaid}
+			if status == workorder.StatusCancelled {
+				steps = []workorder.Status{status}
+			}
+			for _, step := range steps {
+				if _, err := s.SetStatus(first, step); err != nil {
+					t.Fatal(err)
+				}
+				if step == status {
+					break
+				}
+			}
+			second := createPublished(t, s, "2026-10-30T09:00:00-05:00", "2026-10-30T10:00:00-05:00")
+			if _, err := s.AssignProvider(second, "p-104"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAssignProviderConcurrentBooking(t *testing.T) {
+	s := seeded(t)
+	ids := []int{
+		createPublished(t, s, "2026-10-30T09:00:00-05:00", "2026-10-30T10:00:00-05:00"),
+		createPublished(t, s, "2026-10-30T09:00:00-05:00", "2026-10-30T10:00:00-05:00"),
+	}
+	var wg sync.WaitGroup
+	results := make(chan error, len(ids))
+	for _, id := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := s.AssignProvider(id, "p-104")
+			results <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	successes, conflicts := 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrConflict):
+			conflicts++
+		default:
+			t.Fatal(err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("got %d successes and %d conflicts, want one each", successes, conflicts)
+	}
+	for _, id := range ids {
+		w, err := s.GetWorkOrder(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w.Status == workorder.StatusPublished && w.ProviderID != "" {
+			t.Fatalf("failed assignment changed provider: %+v", w)
+		}
+	}
 }
 
 func TestSeedIsConsistent(t *testing.T) {
