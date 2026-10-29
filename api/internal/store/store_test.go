@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -158,6 +159,95 @@ func TestCreateWorkOrderRejectsInvalid(t *testing.T) {
 	_, err := New().CreateWorkOrder(workorder.WorkOrder{Status: workorder.StatusDraft})
 	if !errors.Is(err, workorder.ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+}
+
+func assertStoredWorkOrder(t *testing.T, s *Store, id int, want workorder.WorkOrder, wantErr error) {
+	t.Helper()
+	got, err := s.GetWorkOrder(id)
+	if !errors.Is(err, wantErr) || !reflect.DeepEqual(got, want) {
+		t.Fatalf("stored work order = %+v, %v, want %+v, %v", got, err, want, wantErr)
+	}
+}
+
+func createUnscheduledDraft(t *testing.T, s *Store) int {
+	t.Helper()
+	created, err := s.CreateWorkOrder(workorder.WorkOrder{Title: "New draft", Status: workorder.StatusDraft})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Schedule != nil {
+		t.Fatal("new draft should have no schedule")
+	}
+	return created.ID
+}
+
+func TestReschedule(t *testing.T) {
+	start := time.Date(2026, 11, 3, 15, 0, 0, 0, time.UTC)
+	sc := workorder.Schedule{Start: start, End: start.Add(4 * time.Hour)}
+	for _, status := range []workorder.Status{workorder.StatusPublished, workorder.StatusDraft, workorder.StatusRouted} {
+		t.Run(string(status), func(t *testing.T) {
+			s := seeded(t)
+			id := 9631804
+			if status == workorder.StatusDraft {
+				id = createUnscheduledDraft(t, s)
+			} else if status == workorder.StatusRouted {
+				id = 9631807
+			}
+			before, err := s.GetWorkOrder(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.Status != status || (status == workorder.StatusPublished && before.Title != "Rack and stack two edge servers") {
+				t.Fatalf("unexpected initial work order: %+v", before)
+			}
+			want := before
+			want.Schedule = &sc
+			got, err := s.Reschedule(id, sc)
+			if err != nil || !reflect.DeepEqual(got, want) {
+				t.Fatalf("Reschedule = %+v, %v, want %+v", got, err, want)
+			}
+			assertStoredWorkOrder(t, s, id, want, nil)
+			got.Schedule.Start = start.Add(time.Hour)
+			assertStoredWorkOrder(t, s, id, want, nil)
+		})
+	}
+}
+
+func TestRescheduleRejects(t *testing.T) {
+	start := time.Date(2026, 11, 3, 15, 0, 0, 0, time.UTC)
+	sc := workorder.Schedule{Start: start, End: start.Add(4 * time.Hour)}
+	for _, tt := range []struct {
+		name    string
+		id      int
+		sc      workorder.Schedule
+		wantErr error
+	}{
+		{"Assigned", 9631810, sc, ErrNotReschedulable},
+		{"Work Done", 9631818, sc, ErrNotReschedulable},
+		{"Approved", 9631821, sc, ErrNotReschedulable},
+		{"Paid", 9631823, sc, ErrNotReschedulable},
+		{"Cancelled", 9631825, sc, ErrNotReschedulable},
+		{"invalid Draft window", 9631801, workorder.Schedule{Start: sc.End, End: sc.Start}, workorder.ErrInvalid},
+		{"Assigned invalid window", 9631810, workorder.Schedule{}, ErrNotReschedulable},
+		{"unknown id", 1, sc, ErrNotFound},
+		{"unknown id invalid window", 1, workorder.Schedule{}, ErrNotFound},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := seeded(t)
+			before, beforeErr := s.GetWorkOrder(tt.id)
+			if beforeErr != nil && !errors.Is(beforeErr, ErrNotFound) {
+				t.Fatal(beforeErr)
+			}
+			_, err := s.Reschedule(tt.id, tt.sc)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Reschedule err = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantErr == ErrNotReschedulable && !errors.Is(err, ErrConflict) {
+				t.Fatalf("Reschedule err = %v, want ErrConflict", err)
+			}
+			assertStoredWorkOrder(t, s, tt.id, before, beforeErr)
+		})
 	}
 }
 
