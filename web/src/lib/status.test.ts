@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { healthChip, statusChip } from './status'
+import { expenseStatusChip, healthChip, statusChip } from './status'
+
+describe('expenseStatusChip', () => {
+  it.each(['Pending', 'Approved', 'Rejected'] as const)('labels %s', (status) => {
+    expect(expenseStatusChip(status).label).toBe(status)
+  })
+
+  it('uses the alert background for Rejected', () => {
+    expect(expenseStatusChip('Rejected').bg).toBe('#F6D2BC')
+  })
+})
 
 describe('statusChip', () => {
   it('shows Published in green', () => {
