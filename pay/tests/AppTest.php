@@ -178,8 +178,8 @@ final class AppTest extends TestCase
         self::assertSame(200, $status);
         self::assertSame([
             'items' => [
-                ['id' => 9631821, 'labor' => 140.0, 'expenses' => 0.0, 'total' => 140.0],
-                ['id' => 9631822, 'labor' => 216.0, 'expenses' => 0.0, 'total' => 216.0],
+                ['id' => 9631821, 'labor' => 140.0, 'expenses' => 0.0, 'adjustments' => 0.0, 'total' => 140.0],
+                ['id' => 9631822, 'labor' => 216.0, 'expenses' => 0.0, 'adjustments' => 0.0, 'total' => 216.0],
             ],
             'count' => 2,
             'total' => 356.0,
@@ -195,9 +195,25 @@ final class AppTest extends TestCase
 
         self::assertSame(200, $status);
         self::assertSame([
-            'items' => [['id' => 9631810, 'labor' => 260.0, 'expenses' => 18.0, 'total' => 278.0]],
+            'items' => [['id' => 9631810, 'labor' => 260.0, 'expenses' => 18.0, 'adjustments' => 0.0, 'total' => 278.0]],
             'count' => 1,
             'total' => 278.0,
+        ], $body);
+    }
+
+    public function testQuotesWithAdjustments(): void
+    {
+        [$status, $body] = (new App())->handle(
+            'POST',
+            '/quotes',
+            '{"items":[{"id":9631821,"pay":{"type":"Fixed","rate":140},"approvedExpenseCents":0,"adjustmentCents":-1500}]}',
+        );
+
+        self::assertSame(200, $status);
+        self::assertSame([
+            'items' => [['id' => 9631821, 'labor' => 140.0, 'expenses' => 0.0, 'adjustments' => -15.0, 'total' => 125.0]],
+            'count' => 1,
+            'total' => 125.0,
         ], $body);
     }
 
@@ -223,9 +239,9 @@ final class AppTest extends TestCase
         self::assertSame(200, $status);
         self::assertSame([
             'items' => [
-                ['id' => 1, 'labor' => 0.1, 'expenses' => 0.0, 'total' => 0.1],
-                ['id' => 2, 'labor' => 0.1, 'expenses' => 0.0, 'total' => 0.1],
-                ['id' => 3, 'labor' => 0.1, 'expenses' => 0.0, 'total' => 0.1],
+                ['id' => 1, 'labor' => 0.1, 'expenses' => 0.0, 'adjustments' => 0.0, 'total' => 0.1],
+                ['id' => 2, 'labor' => 0.1, 'expenses' => 0.0, 'adjustments' => 0.0, 'total' => 0.1],
+                ['id' => 3, 'labor' => 0.1, 'expenses' => 0.0, 'adjustments' => 0.0, 'total' => 0.1],
             ],
             'count' => 3,
             'total' => 0.3,
@@ -247,6 +263,7 @@ final class AppTest extends TestCase
         $listError = 'items must be a list of 1 to 100 work orders';
         $idError = 'item 1: id must be a positive whole number';
         $expenseError = 'item 1: approvedExpenseCents must be a whole number of 0 or more';
+        $adjustmentError = 'item 2: adjustmentCents must be a whole number from -500000 to 500000';
 
         return [
             'missing items' => ['{}', $listError],
@@ -261,6 +278,8 @@ final class AppTest extends TestCase
             'string pay' => ['{"items":[{"id":9631821,"pay":"x"}]}', 'item 1: pay must be an object'],
             'negative expenses' => [json_encode(['items' => [$item + ['approvedExpenseCents' => -1]]], JSON_THROW_ON_ERROR), $expenseError],
             'fractional expenses' => [json_encode(['items' => [$item + ['approvedExpenseCents' => 12.5]]], JSON_THROW_ON_ERROR), $expenseError],
+            'second item invalid adjustment' => [json_encode(['items' => [$item, array_replace($item, ['id' => 2, 'adjustmentCents' => '100'])]], JSON_THROW_ON_ERROR), $adjustmentError],
+            'excessive deduction' => [json_encode(['items' => [$item + ['adjustmentCents' => -14001]]], JSON_THROW_ON_ERROR), 'item 1: deductions must not exceed the rest of the pay'],
             'second item missing hours' => [json_encode(['items' => [$item, ['id' => 9631810, 'pay' => ['type' => 'Hourly', 'rate' => 65]]]], JSON_THROW_ON_ERROR), 'item 2: hours must be a number'],
         ];
     }
