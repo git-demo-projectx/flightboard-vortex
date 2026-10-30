@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError, payApi } from './client'
-import type { Expense, PayQuote, PayRunQuote, PayRunQuoteItem, PayRunResult, WorkOrderWeek } from './types'
+import type { Adjustment, Expense, PayQuote, PayRunQuote, PayRunQuoteItem, PayRunResult, WorkOrderWeek } from './types'
 import { makeWorkOrder } from '../test/fixtures'
 
 const workOrder = makeWorkOrder()
@@ -25,6 +25,44 @@ const quote: PayQuote = {
 }
 const expensePath = `/api/work-orders/${workOrder.id}/expenses`
 const fetchMock = vi.fn<typeof fetch>()
+const adjustment: Adjustment = {
+  id: 'a1', kind: 'Bonus', reason: 'Weekend call-out', amountCents: 5000,
+  createdAt: '2026-10-29T21:00:00Z',
+}
+const newAdjustment = { kind: adjustment.kind, reason: adjustment.reason, amountCents: adjustment.amountCents }
+
+describe('adjustment API calls', () => {
+  const path = `/api/work-orders/${workOrder.id}/adjustments`
+  const calls = [
+    { name: 'list', call: () => api.listAdjustments(workOrder.id), path, method: 'GET', body: undefined, response: [adjustment] },
+    { name: 'add', call: () => api.addAdjustment(workOrder.id, newAdjustment), path, method: 'POST', body: newAdjustment, response: adjustment },
+    { name: 'remove', call: () => api.removeAdjustment(workOrder.id, adjustment.id), path: `${path}/a1`, method: 'DELETE', body: undefined, response: undefined },
+  ]
+
+  it.each(calls)('$name sends the expected request', async (test) => {
+    const response = test.response === undefined
+      ? new Response(null, { status: 204 })
+      : new Response(JSON.stringify(test.response))
+    fetchMock.mockResolvedValue(response)
+    await expect(test.call()).resolves.toEqual(test.response)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe(test.path)
+    expect(init?.method ?? 'GET').toBe(test.method)
+    expect(init?.body).toBe(test.body === undefined ? undefined : JSON.stringify(test.body))
+  })
+
+  it.each(calls)('$name propagates API errors', async (test) => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ error: 'Adjustment change not allowed' }), { status: 409 }))
+    await expect(test.call()).rejects.toMatchObject({ status: 409, message: 'Adjustment change not allowed' })
+  })
+
+  it('encodes adjustment ids as a path segment', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }))
+    await api.removeAdjustment(workOrder.id, 'a/b')
+    expect(fetchMock.mock.calls[0][0]).toBe(`${path}/a%2Fb`)
+  })
+})
 
 beforeEach(() => {
   fetchMock.mockReset()
@@ -99,6 +137,14 @@ describe('expense API calls', () => {
 })
 
 describe('pay quotes', () => {
+  it.each([undefined, [], [adjustment]])('sends only adjustment pay fields %j', async (adjustments) => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify(quote)))
+    await expect(payApi.quote(workOrder.pay, [expense], adjustments)).resolves.toEqual(quote)
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith('/pay/quote', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...workOrder.pay, expenses: [expense], adjustments: adjustments?.map(() => newAdjustment) }),
+    })
+  })
   it.each([undefined, [], [expense]])('sends optional expenses %j', async (expenses) => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify(quote)))
 

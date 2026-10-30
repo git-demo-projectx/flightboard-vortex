@@ -8,14 +8,15 @@ import Typography from '@mui/material/Typography'
 import { useState, type ReactNode } from 'react'
 import { Link as RouterLink, useParams } from 'react-router-dom'
 import { api } from '../../api/client'
-import { useWorkOrder } from '../../api/hooks'
-import type { Status, Task, WorkOrder } from '../../api/types'
+import { useAsync, useWorkOrder } from '../../api/hooks'
+import type { Adjustment, Status, Task, WorkOrder } from '../../api/types'
 import { HealthChip, ScoreBadge, StatusChip } from '../../components/Chips'
 import { PageHeader } from '../../components/PageHeader'
 import { formatSchedule, formatTime } from '../../lib/format'
 import { colors } from '../../theme'
 import { PayBreakdown } from './PayBreakdown'
 import { TaskList } from './TaskList'
+import { AdjustmentsPanel } from './AdjustmentsPanel'
 
 /** The main action the buyer can take in each status. */
 const NEXT_ACTION: Partial<Record<Status, { label: string; to: Status }>> = {
@@ -23,7 +24,7 @@ const NEXT_ACTION: Partial<Record<Status, { label: string; to: Status }>> = {
   'Work Done': { label: 'Approve', to: 'Approved' },
 }
 
-function Panel({ title, children }: { title: string; children: ReactNode }) {
+function Panel({ title, children }: Readonly<{ title: string; children: ReactNode }>) {
   return (
     <Card>
       <Typography variant="h2" sx={{ px: 2.5, pt: 2, pb: 1 }}>
@@ -32,6 +33,20 @@ function Panel({ title, children }: { title: string; children: ReactNode }) {
       <Divider />
       <Box sx={{ p: 2.5 }}>{children}</Box>
     </Card>
+  )
+}
+
+function PayPanels({ wo }: Readonly<{ wo: WorkOrder }>) {
+  const adjustments = useAsync<Adjustment[]>(() => api.listAdjustments(wo.id), `adjustments-${wo.id}`)
+  return (
+    <Box sx={{ display: 'grid', gap: 2, minWidth: 0 }}>
+      <Panel title="Pay">
+        <PayBreakdown pay={wo.pay} adjustments={adjustments.data ?? []} />
+      </Panel>
+      <Panel title="Adjustments">
+        <AdjustmentsPanel wo={wo} adjustments={adjustments} />
+      </Panel>
+    </Box>
   )
 }
 
@@ -148,9 +163,7 @@ export function WorkOrderDetailPage() {
             <TaskList tasks={wo.tasks} disabled={wo.status === 'Cancelled'} onToggle={onToggle} />
           </Panel>
         </Box>
-        <Panel title="Pay">
-          <PayBreakdown pay={wo.pay} />
-        </Panel>
+        <PayPanels key={wo.id} wo={wo} />
       </Box>
     </>
   )

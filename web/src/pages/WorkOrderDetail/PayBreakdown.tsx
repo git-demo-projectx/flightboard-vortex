@@ -3,13 +3,15 @@ import Box from '@mui/material/Box'
 import Divider from '@mui/material/Divider'
 import Typography from '@mui/material/Typography'
 import { usePayQuote } from '../../api/hooks'
-import type { Pay, PayType } from '../../api/types'
+import type { Adjustment, Pay, PayType } from '../../api/types'
 import { formatMoney, PAY_TYPE_LABELS } from '../../lib/format'
 
 /** Pay types the detail page can break down. */
-const BREAKDOWN_TYPES: PayType[] = ['Fixed', 'Hourly']
+const BREAKDOWN_TYPES = new Set<PayType>(['Fixed', 'Hourly'])
 
-function Row({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
+type PayBreakdownProps = Readonly<{ pay: Pay; adjustments?: readonly Adjustment[] }>
+
+function Row({ label, value, strong }: Readonly<{ label: string; value: string; strong?: boolean }>) {
   return (
     <Box sx={{ display: 'flex', justifyContent: 'space-between', py: 0.5 }}>
       <Typography sx={{ fontWeight: strong ? 700 : 400 }}>{label}</Typography>
@@ -34,8 +36,8 @@ function termsRows(pay: Pay) {
   }
 }
 
-function Quote({ pay }: { pay: Pay }) {
-  const quote = usePayQuote(pay)
+function Quote({ pay, adjustments }: PayBreakdownProps) {
+  const quote = usePayQuote(pay, adjustments)
   if (quote.error) {
     return <Alert severity="warning">Pay service unavailable: {quote.error.message}</Alert>
   }
@@ -44,8 +46,8 @@ function Quote({ pay }: { pay: Pay }) {
   }
   return (
     <>
-      {quote.data.lines.map((l) => (
-        <Row key={l.label} label={l.label} value={formatMoney(l.amount)} />
+      {quote.data.lines.map((l, index) => (
+        <Row key={`${index}-${l.label}`} label={l.label} value={formatMoney(l.amount)} />
       ))}
       <Divider sx={{ my: 1 }} />
       <Row label="Total Cost" value={formatMoney(quote.data.total)} strong />
@@ -54,8 +56,8 @@ function Quote({ pay }: { pay: Pay }) {
 }
 
 /** PayBreakdown shows pay terms and the pay service's quote for a work order. */
-export function PayBreakdown({ pay }: { pay: Pay }) {
-  if (!BREAKDOWN_TYPES.includes(pay.type)) {
+export function PayBreakdown({ pay, adjustments }: PayBreakdownProps) {
+  if (!BREAKDOWN_TYPES.has(pay.type)) {
     return (
       <Typography color="text.secondary">
         Pay breakdown is not available for {PAY_TYPE_LABELS[pay.type]} pay.
@@ -67,7 +69,7 @@ export function PayBreakdown({ pay }: { pay: Pay }) {
       <Row label="Pay type" value={PAY_TYPE_LABELS[pay.type]} />
       {termsRows(pay)}
       <Divider sx={{ my: 1 }} />
-      <Quote pay={pay} />
+      <Quote pay={pay} adjustments={adjustments} />
     </Box>
   )
 }

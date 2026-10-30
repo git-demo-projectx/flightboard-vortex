@@ -1,4 +1,4 @@
-import type { Expense, NewWorkOrder, Pay, PayQuote, PayRunQuote, PayRunQuoteItem, PayRunResult, Provider, Status, WorkOrder, WorkOrderWeek } from './types'
+import type { Adjustment, Expense, NewAdjustment, NewWorkOrder, Pay, PayQuote, PayRunQuote, PayRunQuoteItem, PayRunResult, Provider, Status, WorkOrder, WorkOrderWeek } from './types'
 
 /** ApiError carries the HTTP status and the server's error message. */
 export class ApiError extends Error {
@@ -16,6 +16,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
+  if (res.status === 204) return undefined as T
   const body = await res.json().catch(() => ({}))
   if (!res.ok) {
     throw new ApiError(res.status, body.error ?? res.statusText)
@@ -53,6 +54,14 @@ export const api = {
     post<Expense>(`/api/work-orders/${workOrderId}/expenses/${expenseId}/approve`, {}),
   rejectExpense: (workOrderId: number, expenseId: string, reason: string) =>
     post<Expense>(`/api/work-orders/${workOrderId}/expenses/${expenseId}/reject`, { reason }),
+  listAdjustments: (workOrderId: number) =>
+    request<Adjustment[]>(`/api/work-orders/${workOrderId}/adjustments`),
+  addAdjustment: (workOrderId: number, adjustment: NewAdjustment) =>
+    post<Adjustment>(`/api/work-orders/${workOrderId}/adjustments`, adjustment),
+  removeAdjustment: (workOrderId: number, adjustmentId: string) =>
+    request<void>(`/api/work-orders/${workOrderId}/adjustments/${encodeURIComponent(adjustmentId)}`, {
+      method: 'DELETE',
+    }),
   listProviders: () => request<Provider[]>('/api/providers'),
   nearbyProviders: (workOrderId: number) =>
     request<Provider[]>(`/api/work-orders/${workOrderId}/nearby-providers`),
@@ -60,6 +69,11 @@ export const api = {
 
 // Pay quotes come from the PHP pay service (/pay), called directly by the web.
 export const payApi = {
-  quote: (pay: Pay, expenses?: Expense[]) => post<PayQuote>('/pay/quote', { ...pay, expenses }),
+  quote: (pay: Pay, expenses?: Expense[], adjustments?: readonly NewAdjustment[]) =>
+    post<PayQuote>('/pay/quote', {
+      ...pay,
+      expenses,
+      adjustments: adjustments?.map(({ kind, reason, amountCents }) => ({ kind, reason, amountCents })),
+    }),
   quotes: (items: PayRunQuoteItem[]) => post<PayRunQuote>('/pay/quotes', { items }),
 }
