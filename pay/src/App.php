@@ -9,7 +9,7 @@ namespace Flightboard\Pay;
  *
  * Routes:
  *   GET  /health  -> {"status":"ok"}
- *   POST /quote   -> a quote from PayCalculator::quote()
+ *   POST /quote   -> a quote with optional expenses and bonus/deduction adjustments
  *   POST /quotes  -> batch labor and approved expense totals
  */
 final class App
@@ -67,13 +67,19 @@ final class App
         if (is_object($expenses)) {
             $pay['expenses'] = $expenses;
         }
+        $adjustments = json_decode($body)->adjustments ?? null;
+        if (is_object($adjustments)) {
+            $pay['adjustments'] = $adjustments;
+        }
 
         try {
-            return [200, $this->calculator->quote($pay)];
+            $response = [200, $this->calculator->quote($pay)];
         } catch (InvalidPay $e) {
-            return [400, ['error' => $e->getMessage()]];
+            $response = [400, ['error' => $e->getMessage()]];
         } catch (UnsupportedPayType $e) {
-            return [422, ['error' => $e->getMessage()]];
+            $response = [422, ['error' => $e->getMessage()]];
         }
+
+        return $response;
     }
 }

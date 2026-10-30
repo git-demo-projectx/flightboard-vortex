@@ -9,6 +9,8 @@ namespace Flightboard\Pay;
  *
  * Input matches the `pay` object of a work order from the API:
  *   ['type' => 'Hourly', 'rate' => 65, 'hours' => 4]
+ * Optional expenses add reimbursements; adjustments add Bonus or Deduction lines
+ * with a non-empty reason and positive amountCents from 1 to 100000.
  *
  * Output is a quote:
  *   ['type' => 'Hourly', 'lines' => [['label' => ..., 'amount' => ...]], 'total' => 260.0]
@@ -52,12 +54,59 @@ final class PayCalculator
             $lines[] = ['label' => 'Expense - ' . $expense['category'], 'amount' => (float) $amountCents / 100];
         }
 
+        $adjustments = $this->adjustmentLines(array_key_exists('adjustments', $pay) ? $pay['adjustments'] : []);
+        $lines = array_merge($lines, $adjustments);
         $total = array_sum(array_column($lines, 'amount'));
+        if (count($lines) > 1) {
+            $total = round($total, 2);
+        }
+        if ($total < 0) {
+            throw new InvalidPay('deductions must not exceed the rest of the pay');
+        }
 
         return [
             'type' => $type,
             'lines' => $lines,
-            'total' => $expenses === [] ? $total : round($total, 2),
+            'total' => $total,
+        ];
+    }
+
+    /** @return list<array{label: string, amount: float}> */
+    private function adjustmentLines(mixed $adjustments): array
+    {
+        if (!is_array($adjustments) || !array_is_list($adjustments)) {
+            throw new InvalidPay('adjustments must be a list');
+        }
+        if (count($adjustments) > 5) {
+            throw new InvalidPay('adjustments must have at most 5 items');
+        }
+
+        $lines = [];
+        foreach ($adjustments as $adjustment) {
+            $lines[] = $this->adjustmentLine($adjustment);
+        }
+
+        return $lines;
+    }
+
+    /** @return array{label: string, amount: float} */
+    private function adjustmentLine(mixed $adjustment): array
+    {
+        if (!is_array($adjustment) || !in_array($adjustment['kind'] ?? null, ['Bonus', 'Deduction'], true)) {
+            throw new InvalidPay('adjustment kind must be Bonus or Deduction');
+        }
+        $reason = $adjustment['reason'] ?? null;
+        if (!is_string($reason) || trim($reason) === '') {
+            throw new InvalidPay('adjustment reason must be a non-empty string');
+        }
+        $amountCents = $adjustment['amountCents'] ?? null;
+        if (!is_int($amountCents) || $amountCents < 1 || $amountCents > 100000) {
+            throw new InvalidPay('adjustment amountCents must be a whole number from 1 to 100000');
+        }
+
+        return [
+            'label' => $adjustment['kind'] . ' - ' . $reason,
+            'amount' => ($adjustment['kind'] === 'Bonus' ? 1 : -1) * ((float) $amountCents / 100),
         ];
     }
 

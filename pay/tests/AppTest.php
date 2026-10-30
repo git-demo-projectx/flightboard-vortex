@@ -6,6 +6,7 @@ namespace Flightboard\Pay\Tests;
 
 use Flightboard\Pay\App;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\DataProviderExternal;
 use PHPUnit\Framework\TestCase;
 
 final class AppTest extends TestCase
@@ -61,6 +62,68 @@ final class AppTest extends TestCase
         self::assertSame(
             $app->handle('POST', '/quote', '{"type":"Fixed","rate":180}'),
             $app->handle('POST', '/quote', '{"type":"Fixed","rate":180,"expenses":[]}'),
+        );
+    }
+
+    public function testQuoteWithAdjustments(): void
+    {
+        [$status, $body] = (new App())->handle('POST', '/quote', json_encode([
+            'type' => 'Fixed', 'rate' => 100,
+            'adjustments' => [
+                ['kind' => 'Bonus', 'reason' => 'Weekend call-out', 'amountCents' => 2500],
+                ['kind' => 'Deduction', 'reason' => 'Late arrival', 'amountCents' => 1500],
+            ],
+        ], JSON_THROW_ON_ERROR));
+
+        self::assertSame(200, $status);
+        self::assertSame([
+            'type' => 'Fixed',
+            'lines' => [
+                ['label' => 'Labor - Fixed pay', 'amount' => 100.0],
+                ['label' => 'Bonus - Weekend call-out', 'amount' => 25.0],
+                ['label' => 'Deduction - Late arrival', 'amount' => -15.0],
+            ],
+            'total' => 110.0,
+        ], $body);
+    }
+
+    public function testQuoteRejectsNegativeAdjustedTotal(): void
+    {
+        self::assertSame(
+            [400, ['error' => 'deductions must not exceed the rest of the pay']],
+            (new App())->handle('POST', '/quote', json_encode([
+                'type' => 'Fixed', 'rate' => 100,
+                'adjustments' => [['kind' => 'Deduction', 'reason' => 'Credit', 'amountCents' => 10001]],
+            ], JSON_THROW_ON_ERROR)),
+        );
+    }
+
+    #[DataProvider('invalidAdjustmentObjects')]
+    public function testQuoteRejectsAdjustmentObjects(string $adjustments): void
+    {
+        self::assertSame(
+            [400, ['error' => 'adjustments must be a list']],
+            (new App())->handle('POST', '/quote', '{"type":"Fixed","rate":100,"adjustments":' . $adjustments . '}'),
+        );
+    }
+
+    public static function invalidAdjustmentObjects(): array
+    {
+        return [
+            'empty object' => ['{}'],
+            'object' => ['{"kind":"Bonus","reason":"Credit","amountCents":100}'],
+            'numeric-key object' => ['{"0":{"kind":"Bonus","reason":"Credit","amountCents":100}}'],
+        ];
+    }
+
+    #[DataProviderExternal(PayCalculatorTest::class, 'invalidAdjustments')]
+    public function testQuoteWithInvalidAdjustments(mixed $adjustments, string $error): void
+    {
+        self::assertSame(
+            [400, ['error' => $error]],
+            (new App())->handle('POST', '/quote', json_encode([
+                'type' => 'Fixed', 'rate' => 100, 'adjustments' => $adjustments,
+            ], JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION)),
         );
     }
 
